@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import scipy.stats as st
-from tqdm import tqdm
+from tqdm import trange, tqdm
 import sys
 import math
 
@@ -11,7 +11,7 @@ class Bayes_1d():
     '''
     1自由度バネマス系でベイズ推定を行うクラス
     '''
-    def __init__(self, senarios, acc_end, dis_up, m=1e5, delta=1e-2):
+    def __init__(self, senarios, acc_end, dis_up, m=1e5, delta=1e-2, std_coefficient=1e-1):
         '''
         初期化
 
@@ -27,6 +27,8 @@ class Bayes_1d():
             真の質量
         delta : float
             時間幅
+        std_coefficient : float
+            パラメータの標準偏差の平均に対する比率
         dist_his : list
             パラメータの分布の推移
         '''
@@ -35,6 +37,7 @@ class Bayes_1d():
         self.senarios = senarios
         self.acc_end = acc_end
         self.dis_up = dis_up
+        self.std_coefficient = std_coefficient
         self.dist_his = []
     
     def infer(self):
@@ -95,19 +98,73 @@ class Bayes_1d():
         f : float
             入力された加速度
         '''
-        k_std = k_conditioned/10  # 条件づけられたkの標準偏差
+        k_std = k_conditioned*self.std_coefficient  # 条件づけられたkの標準偏差
         mu = -x_cur/self.m*self.delta2*k_conditioned + 2*x_cur - x_pre - f*self.delta2  # 平均
         std = np.abs(self.delta2/self.m*x_cur*k_std) # 標準偏差
         p = st.norm.pdf(x_next, loc=mu, scale=std)
         return p
 
+    def infer_counts(self, phase_qty, true_index):
+        '''
+        収束までの試行回数を位相ごとに計測する
+
+        Returns
+        -------
+        phase_qty : int
+            位相の数
+        true_index : int
+            真のパラメータのインデックス
+        '''
+        infer_counts = []  # 収束するまでの推定回数
+
+        for phase in trange(phase_qty):
+            dist_his = []  # パラメータの分布の推移. infer関数と競合するためローカル変数を定義した
+            dist_his.append([1/len(self.senarios)]*len(self.senarios))
+            for i, (x, f) in enumerate(zip(self.dis_up[phase:], self.acc_end[phase:])):
+                if i > 1:
+                    x_next = x
+
+                    norm_const = 0  # 正規化定数を初期化
+                    prior = dist_his[-1]   # 事前分布
+                    posterior = np.array([])  # 事後分布の配列を初期化
+
+                    for j, k_conditioned in enumerate(self.senarios):
+                        p_likelihood = self.likelihood(x_pre, x_cur, x_next, k_conditioned, f_cur)  # 尤度の計算
+                        p = p_likelihood * prior[j]  # 尤度と事前確率の積
+                        if math.isnan(p) or p < eps:
+                            p = eps
+                        norm_const += p
+                        posterior = np.append(posterior, p)
+                    
+                    posterior /= norm_const  # 正規化
+
+                    if posterior[true_index] > 1-1e-4:
+                        infer_counts.append(i-1)
+                        break
+
+                    dist_his.append(posterior)
+
+                    # 変位をずらす
+                    x_pre, x_cur = x_cur, x_next
+                    f_cur = f
+                # 初めは変数に代入するだけ
+                elif i == 0:
+                    x_pre = x
+                elif i == 1:
+                    x_cur = x
+                    f_cur = f
+                else:
+                    print('break')
+                    break
+        
+        return infer_counts
 
 
 class Bayes_2d():
     '''
     2自由度バネマス系でベイズ推定を行うクラス
     '''
-    def __init__(self, senarios, acc_end, dis_down, dis_up, m1=1e5, m2=8e4, delta=1e-2):
+    def __init__(self, senarios, acc_end, dis_down, dis_up, m1=1e5, m2=8e4, delta=1e-2, std_coefficient=1e-1):
         '''
         初期化
 
@@ -125,6 +182,8 @@ class Bayes_2d():
             真の質量
         delta : float
             時間幅
+        std_coefficient : float
+            パラメータの標準偏差の平均に対する比率
         dist_his : list
             パラメータの分布の推移
         '''
@@ -135,6 +194,7 @@ class Bayes_2d():
         self.acc_end = acc_end
         self.dis_down = dis_down
         self.dis_up = dis_up
+        self.std_coefficient = std_coefficient
         self.dist_his = []
     
     def infer(self):
@@ -185,7 +245,7 @@ class Bayes_2d():
         '''
         尤度関数
 
-        Attributes
+        Parameters
         ----------
         x1_pre, x2_pre : float
             1ステップ前の変位
@@ -197,12 +257,91 @@ class Bayes_2d():
             条件付けたkの平均値
         f : float
             入力された加速度
+
+        Returns
+        -------
+        p : float
+            確率密度の値
         '''
-        mu1 = -x1_cur/self.m1*self.delta2*k1_conditioned - self.delta2/self.m1*(x1_cur-x2_cur)*k2_conditioned + 2*x1_cur - x1_pre - f*self.delta2
-        mu2 = (x1_cur-x2_cur)/self.m2*self.delta2*k2_conditioned + 2*x2_cur - x2_pre
-        std1 = 5e-2
-        std2 = 5e-2
-        p_1 = st.norm.pdf(x1_next, loc=mu1, scale=std1)
-        p_2 = st.norm.pdf(x2_next, loc=mu2, scale=std2)
-        p = p_1*p_2
+        # 下層に関する係数
+        a1 = -x1_cur/self.m1*self.delta2
+        a2 = self.delta2/self.m1*(x1_cur-x2_cur)
+        a3 = 2*x1_cur - x1_pre - f*self.delta2
+        # 上層に関する係数
+        b1 = (x1_cur-x2_cur)/self.m2*self.delta2
+        b2 = 2*x2_cur - x2_pre- f*self.delta2
+
+        std_k1 = k1_conditioned * self.std_coefficient  # k1の標準偏差
+        std_k2 = k2_conditioned * self.std_coefficient  # k2の標準偏差
+        # 正規分布の平均
+        mu1 = a1*k1_conditioned - a2*k2_conditioned + a3
+        mu2 = b1*k2_conditioned + b2
+        # 正規分布の分散
+        var1 = (a1*std_k1)**2 + (a2*std_k2)**2
+        var2 = (b1*std_k2)**2
+        # 共分散
+        covariance = a2*b1*std_k2**2
+    
+        mean_matrix = np.array([mu1, mu2])  # 平均行列
+        cov_matrix  = np.array([[var1, covariance],[covariance, var2]])  # 分散共分散行列
+        p = st.multivariate_normal(mean_matrix, cov_matrix).pdf([x1_next, x2_next])  # 確率密度の値
         return p
+
+    def infer_counts(self, phase_qty, true_index):
+        '''
+        収束までの試行回数を位相ごとに計測する
+
+        Returns
+        -------
+        phase_qty : int
+            位相の数
+        true_index : int
+            真のパラメータのインデックス
+        '''
+        infer_counts = []  # 収束するまでの推定回数
+
+        for phase in trange(phase_qty):
+            dist_his = []  # パラメータの分布の推移. infer関数と競合するためローカル変数を定義した
+            dist_his.append([1/len(self.senarios)]*len(self.senarios))
+            for i, (x1, x2, f) in enumerate(zip(self.dis_down[phase:], self.dis_up[phase:], self.acc_end[phase:])):
+                if i > 1:
+                    x1_next, x2_next = x1, x2
+
+                    norm_const = 0  # 正規化定数を初期化
+                    prior = dist_his[-1]   # 事前分布
+                    posterior = np.array([])  # 事後分布の配列を初期化
+
+                    for j, senario in enumerate(self.senarios):
+                        k1_conditioned, k2_conditioned = senario  # パラメータをアンパック
+                        p_likelihood = self.likelihood(x1_pre, x2_pre, x1_cur, x2_cur, x1_next, x2_next, k1_conditioned, k2_conditioned, f_cur)  # 尤度の計算
+                        p = p_likelihood * prior[j]  # 尤度と事前確率の積
+                        if math.isnan(p) or p < eps:
+                            p = eps
+                        norm_const += p
+                        posterior = np.append(posterior, p)
+                    
+                    posterior /= norm_const  # 正規化
+
+                    if posterior[true_index] > 1-1e-4:
+                        infer_counts.append(i-1)
+                        break
+
+                    dist_his.append(posterior)
+
+                    # 変位をずらす
+                    x1_pre, x2_pre, x1_cur, x2_cur = x1_cur, x2_cur, x1_next, x2_next
+                    f_cur = f
+                # 初めは変数に代入するだけ
+                elif i == 0:
+                    x1_pre = x1
+                    x2_pre = x2
+                elif i == 1:
+                    x1_cur = x1
+                    x2_cur = x2
+                    f_cur = f
+                else:
+                    print('break')
+                    break
+
+        
+        return infer_counts
