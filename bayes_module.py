@@ -5,13 +5,14 @@ from tqdm import trange, tqdm
 import sys
 import math
 
+threshold_convergence = 1e-3
 eps = sys.float_info.epsilon  # 微小数
 
 class Bayes_1d():
     '''
     1自由度バネマス系でベイズ推定を行うクラス
     '''
-    def __init__(self, senarios, acc_end, dis_up, m=1e5, delta=1e-2, std_coefficient=1e-1):
+    def __init__(self, senarios, acc_end, dis_up, m=1e5, delta=1e-2, std_coefficient=2e-1):
         '''
         初期化
 
@@ -138,7 +139,7 @@ class Bayes_1d():
                     
                     posterior /= norm_const  # 正規化
 
-                    if posterior[true_index] > 1-1e-4:
+                    if posterior[true_index] > 1-threshold_convergence:
                         infer_counts.append(i-1)
                         break
 
@@ -159,12 +160,11 @@ class Bayes_1d():
         
         return infer_counts
 
-
 class Bayes_2d():
     '''
     2自由度バネマス系でベイズ推定を行うクラス
     '''
-    def __init__(self, senarios, acc_end, dis_down, dis_up, m1=1e5, m2=8e4, delta=1e-2, std_coefficient=1e-1):
+    def __init__(self, senarios, acc_end, dis_down, dis_up, m1=1e5, m2=8e4, delta=1e-2, std_coefficient=2e-1):
         '''
         初期化
 
@@ -322,7 +322,7 @@ class Bayes_2d():
                     
                     posterior /= norm_const  # 正規化
 
-                    if posterior[true_index] > 1-1e-4:
+                    if posterior[true_index] > 1-threshold_convergence:
                         infer_counts.append(i-1)
                         break
 
